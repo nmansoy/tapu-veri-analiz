@@ -26,6 +26,37 @@ def to_csv_download(df):
     """Pandas DataFrame'i indirilebilir CSV formatına çevirir."""
     return df.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
 
+def sql_islem(uploaded_file, query, output_name):
+    """SQL işlemlerini yapan ana fonksiyon"""
+    if uploaded_file:
+        try:
+            # Dosyayı belleğe (SQLite) yükle
+            conn = sqlite3.connect(":memory:")
+            # Pandas ile yüklemek SQL insert'ten çok daha hızlıdır
+            df = pd.read_csv(uploaded_file, encoding="utf-8-sig", on_bad_lines='skip')
+            
+            # Kolon isimlerindeki boşlukları temizle (SQL hatası olmasın diye)
+            df.columns = [c.strip() for c in df.columns]
+            
+            df.to_sql("veriler", conn, index=False, if_exists="replace")
+            
+            # Sorguyu çalıştır
+            result_df = pd.read_sql_query(query, conn)
+            conn.close()
+            
+            st.success(f"✅ İşlem Başarılı! Bulunan Kayıt Sayısı: {len(result_df)}")
+            st.dataframe(result_df.head()) # İlk 5 satırı göster
+            
+            csv_data = to_csv_download(result_df)
+            st.download_button(
+                label=f"📥 {output_name} İndir",
+                data=csv_data,
+                file_name=f"{output_name}.csv",
+                mime="text/csv"
+            )
+        except Exception as e:
+            st.error(f"SQL Hatası: {e}")
+
 # --- ANA AKIŞ ---
 
 # Yan Menü (Sidebar)
@@ -77,37 +108,6 @@ if secim == "1. Hazırlık (ZIP -> Birleştirme)":
                 file_name="Birlestirilmis_Sonuc.csv",
                 mime="text/csv"
             )
-
-# --- GENEL SQL FONKSİYONU ---
-def sql_islem(uploaded_file, query, output_name):
-    if uploaded_file:
-        try:
-            # Dosyayı belleğe (SQLite) yükle
-            conn = sqlite3.connect(":memory:")
-            # Pandas ile yüklemek SQL insert'ten çok daha hızlıdır
-            df = pd.read_csv(uploaded_file, encoding="utf-8-sig", on_bad_lines='skip')
-            
-            # Kolon isimlerindeki boşlukları temizle (SQL hatası olmasın diye)
-            df.columns = [c.strip() for c in df.columns]
-            
-            df.to_sql("veriler", conn, index=False, if_exists="replace")
-            
-            # Sorguyu çalıştır
-            result_df = pd.read_sql_query(query, conn)
-            conn.close()
-            
-            st.write(f"Bulunan Kayıt: {len(result_df)}")
-            st.dataframe(result_df.head()) # İlk 5 satırı göster
-            
-            csv_data = to_csv_download(result_df)
-            st.download_button(
-                label=f"📥 {output_name} İndir",
-                data=csv_data,
-                file_name=f"{output_name}.csv",
-                mime="text/csv"
-            )
-        except Exception as e:
-            st.error(f"SQL Hatası: {e}")
 
 # --- AŞAMA 2: GENEL FİLTRE ---
 elif secim == "2. Genel Filtre (BBZeminid)":
