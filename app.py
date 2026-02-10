@@ -1,16 +1,20 @@
 import streamlit as st
-import os
 import zipfile
-import csv
 import sqlite3
 import pandas as pd
-from io import BytesIO
 
 # Sayfa Ayarları
 st.set_page_config(page_title="Tapu Veri Merkezi", layout="wide")
-st.title("📂 Tapu Veri İşleme Merkezi v7 (Web)")
+st.title("📂 Tapu Veri İşleme Merkezi v7 (Otomatik Akış)")
 
-# --- YARDIMCI FONKSİYONLAR ---
+# --- 1. HAFIZA YÖNETİMİ (SESSION STATE) ---
+# Eğer hafızada veri yoksa boş bir alan açıyoruz
+if 'aktif_veri' not in st.session_state:
+    st.session_state['aktif_veri'] = None
+if 'dosya_adi' not in st.session_state:
+    st.session_state['dosya_adi'] = ""
+
+# --- 2. YARDIMCI FONKSİYONLAR ---
 
 def ayrac_bul(file_obj):
     """Dosya nesnesinden ayıracı bulur."""
@@ -26,119 +30,150 @@ def to_csv_download(df):
     """Pandas DataFrame'i indirilebilir CSV formatına çevirir."""
     return df.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
 
-def sql_islem(uploaded_file, query, output_name):
-    """SQL işlemlerini yapan ana fonksiyon"""
-    if uploaded_file:
-        try:
-            # Dosyayı belleğe (SQLite) yükle
-            conn = sqlite3.connect(":memory:")
-            # Pandas ile yüklemek SQL insert'ten çok daha hızlıdır
-            df = pd.read_csv(uploaded_file, encoding="utf-8-sig", on_bad_lines='skip')
-            
-            # Kolon isimlerindeki boşlukları temizle (SQL hatası olmasın diye)
-            df.columns = [c.strip() for c in df.columns]
-            
-            df.to_sql("veriler", conn, index=False, if_exists="replace")
-            
-            # Sorguyu çalıştır
-            result_df = pd.read_sql_query(query, conn)
-            conn.close()
-            
-            st.success(f"✅ İşlem Başarılı! Bulunan Kayıt Sayısı: {len(result_df)}")
-            st.dataframe(result_df.head()) # İlk 5 satırı göster
-            
-            csv_data = to_csv_download(result_df)
-            st.download_button(
-                label=f"📥 {output_name} İndir",
-                data=csv_data,
-                file_name=f"{output_name}.csv",
-                mime="text/csv"
-            )
-        except Exception as e:
-            st.error(f"SQL Hatası: {e}")
+def hafiza_bilgisi_goster():
+    """Şu an hafızada ne olduğunu gösterir."""
+    if st.session_state['aktif_veri'] is not None:
+        df = st.session_state['aktif_veri']
+        st.info(f"🧠 **Hafızadaki Veri:** {st.session_state['dosya_adi']} | **Satır Sayısı:** {len(df)}")
+        
+        # Önizleme butonu
+        with st.expander("👀 Hafızadaki Veriyi Gör"):
+            st.dataframe(df.head())
+    else:
+        st.warning("⚠️ Hafızada henüz veri yok. Lütfen 1. Aşamadan başlayın veya dosya yükleyin.")
 
-# --- ANA AKIŞ ---
+def sql_calistir(df, query, yeni_dosya_adi):
+    """Verilen DataFrame üzerinde SQL çalıştırır ve hafızayı günceller."""
+    try:
+        conn = sqlite3.connect(":memory:")
+        # Kolon isimlerini temizle
+        df.columns = [c.strip() for c in df.columns]
+        df.to_sql("veriler", conn, index=False, if_exists="replace")
+        
+        # Sorguyu çalıştır
+        sonuc_df = pd.read_sql_query(query, conn)
+        conn.close()
+        
+        return sonuc_df
+    except Exception as e:
+        st.error(f"SQL Hatası: {e}")
+        return None
 
-# Yan Menü (Sidebar)
+# --- 3. YAN MENÜ ---
 st.sidebar.header("İşlem Seçimi")
-secim = st.sidebar.radio("Hangi Aşamayı Çalıştırmak İstersiniz?", 
-    ["1. Hazırlık (ZIP -> Birleştirme)", 
+secim = st.sidebar.radio("Adımlar:", 
+    ["1. Hazırlık (ZIP -> Birleştir)", 
      "2. Genel Filtre (BBZeminid)", 
      "3. Özel Rapor (KiKm)", 
      "4. Mimari Durum"])
 
-# --- AŞAMA 1: HAZIRLIK ---
-if secim == "1. Hazırlık (ZIP -> Birleştirme)":
-    st.header("1. Aşama: ZIP Dosyalarından Tek CSV'ye")
+st.sidebar.markdown("---")
+if st.sidebar.button("🗑️ Hafızayı Temizle"):
+    st.session_state['aktif_veri'] = None
+    st.session_state['dosya_adi'] = ""
+    st.rerun()
+
+# --- 4. ANA AKIŞ ---
+
+# ==========================================
+# AŞAMA 1: HAZIRLIK
+# ==========================================
+if secim == "1. Hazırlık (ZIP -> Birleştir)":
+    st.header("1. Aşama: Dosya Hazırlığı")
+    st.markdown("ZIP dosyalarını yükleyin, sistem bunları birleştirip hafızaya alacaktır.")
     
-    uploaded_files = st.file_uploader("ZIP Dosyalarını Yükleyin", type="zip", accept_multiple_files=True)
+    uploaded_files = st.file_uploader("ZIP Dosyalarını Seçin", type="zip", accept_multiple_files=True)
     
-    if st.button("İşlemi Başlat") and uploaded_files:
+    if st.button("🚀 Birleştir ve Hafızaya Al") and uploaded_files:
         all_dataframes = []
-        progress_bar = st.progress(0)
-        status_text = st.empty()
+        bar = st.progress(0)
         
         for i, zip_file in enumerate(uploaded_files):
-            status_text.text(f"İşleniyor: {zip_file.name}")
             with zipfile.ZipFile(zip_file) as z:
                 for filename in z.namelist():
                     if filename.endswith('.csv'):
                         with z.open(filename) as f:
-                            # Ayraç tespiti ve okuma
                             sep = ayrac_bul(f)
                             try:
-                                # Pandas ile okumak daha güvenli ve hızlıdır
                                 df = pd.read_csv(f, sep=sep, encoding="utf-8-sig", on_bad_lines='skip', engine='python')
                                 all_dataframes.append(df)
-                            except Exception as e:
-                                st.error(f"Hata ({filename}): {e}")
-            
-            progress_bar.progress((i + 1) / len(uploaded_files))
+                            except: pass
+            bar.progress((i + 1) / len(uploaded_files))
             
         if all_dataframes:
-            status_text.text("Dosyalar birleştiriliyor...")
             final_df = pd.concat(all_dataframes, ignore_index=True)
             
-            st.success(f"✅ İşlem Tamam! Toplam Satır: {len(final_df)}")
+            # HAFIZAYA KAYDET
+            st.session_state['aktif_veri'] = final_df
+            st.session_state['dosya_adi'] = "Birlestirilmis_Ham_Veri"
             
-            csv_data = to_csv_download(final_df)
-            st.download_button(
-                label="📥 Birleştirilmiş Dosyayı İndir",
-                data=csv_data,
-                file_name="Birlestirilmis_Sonuc.csv",
-                mime="text/csv"
-            )
+            st.success(f"✅ İşlem Tamam! {len(final_df)} satır hafızaya alındı.")
+            st.info("👉 Şimdi soldaki menüden 2. Aşamaya geçebilirsiniz.")
+            
+            # İndirme Opsiyonu
+            st.download_button("📥 İstersen İndir (CSV)", to_csv_download(final_df), "Birlestirilmis.csv", "text/csv")
 
-# --- AŞAMA 2: GENEL FİLTRE ---
-elif secim == "2. Genel Filtre (BBZeminid)":
-    st.header("2. Aşama: BBZeminid Filtresi")
-    st.info("Sorgu: BBZeminid değeri '0' olmayanları getirir.")
-    
-    csv_file = st.file_uploader("Birleştirilmiş CSV Dosyasını Seçin", type="csv")
-    if csv_file:
+# ==========================================
+# GENEL SQL ŞABLONU (Aşama 2, 3, 4 için)
+# ==========================================
+else:
+    # Başlıkları ve Sorguları Tanımla
+    if secim == "2. Genel Filtre (BBZeminid)":
+        baslik = "2. Aşama: BBZeminid Filtresi"
+        aciklama = "BBZeminid değeri '0' olmayanları ayıklar."
         query = 'SELECT * FROM veriler WHERE "BBZeminid" != "0"'
-        sql_islem(csv_file, query, "Genel_Filtreli_Sonuc")
-
-# --- AŞAMA 3: ÖZEL RAPOR ---
-elif secim == "3. Özel Rapor (KiKm)":
-    st.header("3. Aşama: KiKm Raporu")
-    
-    csv_file = st.file_uploader("Filtreli CSV Dosyasını Seçin", type="csv")
-    if csv_file:
+        yeni_ad = "Filtreli_Veri"
+        
+    elif secim == "3. Özel Rapor (KiKm)":
+        baslik = "3. Aşama: KiKm Raporu"
+        aciklama = "KiKm için özel kolonları seçer ve tekilleştirir (Distinct)."
         query = """
-            SELECT DISTINCT 
-                AtZeminid, IlAd, IlceAd, MahalleAd, AdaNo, ParselNo, 
-                MimariProjeDurumu, MimariProjeSayisi 
-            FROM veriler
+            SELECT DISTINCT AtZeminid, IlAd, IlceAd, MahalleAd, AdaNo, ParselNo, 
+            MimariProjeDurumu, MimariProjeSayisi FROM veriler
         """
-        sql_islem(csv_file, query, "KiKm_Kurulu_Parseller")
-
-# --- AŞAMA 4: MİMARİ DURUM ---
-elif secim == "4. Mimari Durum":
-    st.header("4. Aşama: Mimari Proje Kontrolü")
-    st.info("Sorgu: MimariProjeDurumu = 'Yok' olanları getirir.")
-    
-    csv_file = st.file_uploader("CSV Dosyasını Seçin", type="csv")
-    if csv_file:
+        yeni_ad = "KiKm_Raporu"
+        
+    elif secim == "4. Mimari Durum":
+        baslik = "4. Aşama: Mimari Kontrol"
+        aciklama = "MimariProjeDurumu 'Yok' olanları listeler."
         query = "SELECT * FROM veriler WHERE MimariProjeDurumu = 'Yok'"
-        sql_islem(csv_file, query, "Mimari_Projesi_Olmayanlar")
+        yeni_ad = "Mimari_Yok_Listesi"
+
+    # Arayüzü Çiz
+    st.header(baslik)
+    st.markdown(aciklama)
+    hafiza_bilgisi_goster()
+    
+    st.markdown("---")
+    
+    # KULLANICI SEÇİMİ: Hafızadaki mi, Yeni Dosya mı?
+    kaynak = st.radio("Hangi veriyi kullanmak istersiniz?", ["🧠 Hafızadaki Veriyi Kullan", "📂 Yeni Dosya Yükle"])
+    
+    df_to_process = None
+    
+    if kaynak == "📂 Yeni Dosya Yükle":
+        uploaded = st.file_uploader("CSV Yükle", type="csv")
+        if uploaded:
+            df_to_process = pd.read_csv(uploaded, encoding="utf-8-sig", on_bad_lines='skip')
+    else:
+        # Hafızayı Kullan
+        if st.session_state['aktif_veri'] is not None:
+            df_to_process = st.session_state['aktif_veri']
+    
+    # İŞLEM BUTONU
+    if st.button(f"⚙️ {yeni_ad} Oluştur"):
+        if df_to_process is not None:
+            sonuc = sql_calistir(df_to_process, query, yeni_ad)
+            
+            if sonuc is not None:
+                st.success(f"✅ İşlem Başarılı! {len(sonuc)} satır bulundu.")
+                
+                # HAFIZAYI GÜNCELLEME SEÇENEĞİ
+                st.session_state['aktif_veri'] = sonuc
+                st.session_state['dosya_adi'] = yeni_ad
+                st.info("💾 Sonuç hafızaya kaydedildi. Bir sonraki aşamada bu veriyi kullanabilirsiniz.")
+                
+                # İndirme Butonu
+                st.download_button(f"📥 {yeni_ad} İndir", to_csv_download(sonuc), f"{yeni_ad}.csv", "text/csv")
+        else:
+            st.error("❌ İşlenecek veri bulunamadı!")
